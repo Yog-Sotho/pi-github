@@ -1,5 +1,3 @@
-# pi-github-agent
-
 <div align="center">
   <h1>pi-github-agent</h1>
   <p><strong>Military-grade, streaming GitHub integration protocol for AI coding agents.</strong></p>
@@ -14,11 +12,11 @@
 
 ## 🚀 Architecture
 
-`pi-github-agent` is not a simple wrapper; it is a high-performance, streaming JSON-RPC bridge designed specifically for LLM-driven coding agents (Pi, Claude Code, Codex). It utilizes **NDJSON (Newline Delimited JSON)** over `stdin/stdout` to stream massive payloads (diffs, large files) without memory exhaustion, implements strict cryptographic path validation, and features automatic circuit-breaking for GitHub API resilience.
+`pi-github` is not a simple wrapper; it is a high-performance, streaming JSON-RPC bridge designed specifically for LLM-driven coding agents (Pi, Claude Code, Codex). It utilizes **NDJSON (Newline Delimited JSON)** over `stdin/stdout` to stream massive payloads (diffs, large files) without memory exhaustion, implements strict cryptographic path validation, and features automatic circuit-breaking for GitHub API resilience.
 
 ```text
 ┌──────────────────┐       NDJSON Stream        ┌──────────────────────┐
-│  AI Coding Agent │ <─────────────────────────> │  pi-github-agent CLI │
+│  AI Coding Agent │ <─────────────────────────> │  pi-github CLI │
 │  (Pi/Claude/etc) │   (stdin/stdout streams)    │                      │
 └──────────────────┘                             │  ┌────────────────┐  │
                                                  │  │ Protocol Layer │  │
@@ -40,11 +38,11 @@
 ## 📦 Installation
 
 ```bash
-npm install pi-github-agent
+npm install pi-github
 # or
-yarn add pi-github-agent
+yarn add pi-github
 # or
-pnpm add pi-github-agent
+pnpm add pi-github
 ```
 
 ## 🛠️ Configuration
