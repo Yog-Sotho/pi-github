@@ -1,5 +1,5 @@
 <div align="center">
-  <h1>pi-github-agent</h1>
+  <h1>pi-github</h1>
   <p><strong>Military-grade, streaming GitHub integration protocol for AI coding agents.</strong></p>
   <p>
     <a href="https://www.npmjs.com/package/pi-github-agent"><img src="https://img.shields.io/npm/v/pi-github-agent" alt="npm"></a>
