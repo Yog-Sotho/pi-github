@@ -1,5 +1,5 @@
 {
-  "name": "pi-github",
+  "name": "pi-github-agent",
   "version": "2.1.0",
   "description": "Streaming NDJSON GitHub tool bridge for AI coding agents (Pi, Claude Code, and others)",
   "type": "module",
@@ -66,5 +66,13 @@
     "streaming"
   ],
   "license": "MIT",
-  "author": "YogSotho"
+  "author": "YogSotho",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Yog-Sotho/pi-github.git"
+  },
+  "homepage": "https://github.com/Yog-Sotho/pi-github#readme",
+  "bugs": {
+    "url": "https://github.com/Yog-Sotho/pi-github/issues"
+  }
 }

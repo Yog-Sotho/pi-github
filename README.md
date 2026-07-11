@@ -2,6 +2,8 @@
   <h1>pi-github</h1>
   <p><strong>Streaming NDJSON GitHub tool bridge for AI coding agents.</strong></p>
   <p>
+    <a href="https://www.npmjs.com/package/pi-github-agent"><img src="https://img.shields.io/npm/v/pi-github-agent" alt="npm"></a>
+    <a href="https://github.com/Yog-Sotho/pi-github/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Yog-Sotho/pi-github/ci.yml?branch=main" alt="CI"></a>
     <img src="https://img.shields.io/badge/TypeScript-Strict-blue" alt="TypeScript">
     <img src="https://img.shields.io/badge/Node-%3E=20.0.0-brightgreen" alt="Node">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT">
@@ -32,9 +34,11 @@
 
 ## Installation
 
+> Published on npm as **`pi-github-agent`** (the unscoped name `pi-github` is taken by an unrelated package). The installed CLI binary is still `pi-github`.
+
 ```bash
-npm install pi-github        # library + CLI
-npm install -g pi-github     # CLI on PATH (needed for the Pi extension)
+npm install pi-github-agent        # library + CLI
+npm install -g pi-github-agent     # CLI on PATH (needed for the Pi extension)
 ```
 
 ## Configuration
@@ -52,8 +56,8 @@ export GITHUB_TOKEN="ghp_..."
 `extensions/pi-github.ts` registers every tool below as a native Pi tool, discovered dynamically from the CLI's manifest:
 
 ```bash
-npm install -g pi-github
-cp node_modules/pi-github/extensions/pi-github.ts ~/.pi/agent/extensions/
+npm install -g pi-github-agent
+cp "$(npm root -g)/pi-github-agent/extensions/pi-github.ts" ~/.pi/agent/extensions/
 # or project-local: cp ... .pi/extensions/
 ```
 
@@ -90,7 +94,7 @@ pi-github tools   # JSON manifest: name, description, streaming flag, JSON Schem
 ### 5. Programmatic API
 
 ```typescript
-import { AgentBridge } from 'pi-github';
+import { AgentBridge } from 'pi-github-agent';
 
 const bridge = new AgentBridge({ token: process.env.GITHUB_TOKEN! });
 
@@ -146,6 +150,39 @@ npm run build       # emits dist/
 ```
 
 See [AUDIT.md](AUDIT.md) for the full audit that preceded the v2.1 rewrite.
+
+## Releasing to npm
+
+Publishing is gated by `prepublishOnly`, which runs the typecheck, lint, full test
+suite, and build automatically — a release cannot ship if any gate fails.
+
+```bash
+# 1. One-time: authenticate (creates/refreshes ~/.npmrc)
+npm login
+
+# 2. Make sure you are on a clean, up-to-date main
+git checkout main && git pull
+
+# 3. Sanity checks
+npm ci                     # clean install against the lockfile
+npm run typecheck && npm run lint && npm run test:coverage
+
+# 4. Inspect exactly what will be published (dist/, extensions/, README, LICENSE)
+npm pack --dry-run
+
+# 5. Bump the version (creates the commit + git tag)
+npm version patch          # or: minor / major
+
+# 6. Publish (prepublishOnly re-runs all gates, then builds dist/)
+npm publish
+
+# 7. Push the release commit and tag
+git push origin main --follow-tags
+
+# 8. Verify
+npm view pi-github-agent version
+npx -y pi-github-agent tools | head -5
+```
 
 ## License
 
