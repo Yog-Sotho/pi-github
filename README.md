@@ -2,6 +2,8 @@
   <h1>pi-github</h1>
   <p><strong>Streaming NDJSON GitHub tool bridge for AI coding agents.</strong></p>
   <p>
+    <a href="https://www.npmjs.com/package/pi-github-agent"><img src="https://img.shields.io/npm/v/pi-github-agent" alt="npm"></a>
+    <a href="https://github.com/Yog-Sotho/pi-github/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/Yog-Sotho/pi-github/ci.yml?branch=main" alt="CI"></a>
     <img src="https://img.shields.io/badge/TypeScript-Strict-blue" alt="TypeScript">
     <img src="https://img.shields.io/badge/Node-%3E=20.0.0-brightgreen" alt="Node">
     <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT">
@@ -32,9 +34,11 @@
 
 ## Installation
 
+> Published on npm as **`pi-github-agent`** (the unscoped name `pi-github` is taken by an unrelated package). The installed CLI binary is still `pi-github`.
+
 ```bash
-npm install pi-github        # library + CLI
-npm install -g pi-github     # CLI on PATH (needed for the Pi extension)
+npm install pi-github-agent        # library + CLI
+npm install -g pi-github-agent     # CLI on PATH (needed for the Pi extension)
 ```
 
 ## Configuration
@@ -52,8 +56,8 @@ export GITHUB_TOKEN="ghp_..."
 `extensions/pi-github.ts` registers every tool below as a native Pi tool, discovered dynamically from the CLI's manifest:
 
 ```bash
-npm install -g pi-github
-cp node_modules/pi-github/extensions/pi-github.ts ~/.pi/agent/extensions/
+npm install -g pi-github-agent
+cp "$(npm root -g)/pi-github-agent/extensions/pi-github.ts" ~/.pi/agent/extensions/
 # or project-local: cp ... .pi/extensions/
 ```
 
@@ -90,7 +94,7 @@ pi-github tools   # JSON manifest: name, description, streaming flag, JSON Schem
 ### 5. Programmatic API
 
 ```typescript
-import { AgentBridge } from 'pi-github';
+import { AgentBridge } from 'pi-github-agent';
 
 const bridge = new AgentBridge({ token: process.env.GITHUB_TOKEN! });
 
@@ -145,8 +149,12 @@ npm run test:coverage
 npm run build       # emits dist/
 ```
 
-See [AUDIT.md](AUDIT.md) for the full audit that preceded the v2.1 rewrite.
+---
 
 ## License
 
-MIT © YogSotho
+MIT
+
+## Author
+
+YogSotho
