@@ -1,178 +1,153 @@
-import { Octokit } from '@octokit/rest';
-import { retry } from '@octokit/plugin-retry';
-import { throttling } from '@octokit/plugin-throttling';
+import crypto from 'crypto';
 import CircuitBreaker from 'opossum';
-import { ToolRequest } from './schemas.js';
-import { StreamMessage } from './protocol.js';
+import { createAuthenticatedClient, OctokitClient } from './auth.js';
+import { ToolRequest, ToolRequestSchema, ToolName } from './schemas.js';
+import { StreamMessage, StreamEmitter } from './protocol.js';
 import { logger } from './logger.js';
-import { SecuritySandbox } from './security.js';
+import { listRepos, getRepo } from '../tools/repo.js';
+import { createBranch } from '../tools/branch.js';
+import { getFileContent, commitFiles } from '../tools/files.js';
+import { getDiff } from '../tools/diff.js';
+import { createPullRequest } from '../tools/pr.js';
+import { searchCode } from '../tools/search.js';
+import { listIssues } from '../tools/issues.js';
 
-const RetryOctokit = Octokit.plugin(retry, throttling);
+export class ToolValidationError extends Error {
+  readonly code = 'VALIDATION_FAILED';
+  constructor(message: string) {
+    super(message);
+    this.name = 'ToolValidationError';
+  }
+}
 
+export interface BridgeConfig {
+  token: string;
+  /** Per-request circuit breaker timeout. Default: 120s. */
+  requestTimeoutMs?: number;
+  /** Enable octokit request throttling/pacing. Default: true. */
+  throttle?: boolean;
+}
+
+export type OnStream = (msg: StreamMessage) => void;
+
+/**
+ * Single dispatch path for all GitHub tools. Every request — programmatic or
+ * CLI — is validated against the zod schema before touching the network, and
+ * every stream frame echoes the caller's request ID.
+ */
 export class AgentBridge {
-  private octokit: InstanceType<typeof RetryOctokit>;
-  private breaker: CircuitBreaker;
+  private octokit: OctokitClient;
+  private breaker: CircuitBreaker<[request: ToolRequest, onStream?: OnStream], unknown>;
 
-  constructor(private config: { token: string; telemetry?: boolean; strictSandbox?: boolean }) {
-    this.octokit = new RetryOctokit({
-      auth: config.token,
-      throttle: {
-        onRateLimit: (retryAfter, options) => {
-          logger.warn({ retryAfter, url: options.url }, 'Rate limit hit, retrying');
-          return true;
-        },
-        onSecondaryRateLimit: (retryAfter, options) => {
-          logger.warn({ retryAfter, url: options.url }, 'Secondary rate limit hit, retrying');
-          return true;
-        },
+  constructor(config: BridgeConfig) {
+    this.octokit = createAuthenticatedClient(config.token, { throttling: config.throttle });
+
+    this.breaker = new CircuitBreaker(
+      (request: ToolRequest, onStream?: OnStream) => this.dispatch(request, onStream),
+      {
+        timeout: config.requestTimeoutMs ?? 120_000,
+        errorThresholdPercentage: 50,
+        resetTimeout: 30_000,
       },
-    });
-
-    this.breaker = new CircuitBreaker(this.executeInternal.bind(this), {
-      timeout: 30000,
-      errorThresholdPercentage: 50,
-      resetTimeout: 30000,
-    });
+    );
 
     this.breaker.on('open', () => logger.error('Circuit breaker opened'));
     this.breaker.on('halfOpen', () => logger.info('Circuit breaker half-open'));
     this.breaker.on('close', () => logger.info('Circuit breaker closed'));
   }
 
-  async execute(
-    tool: ToolRequest['tool'], 
-    args: any, 
-    onStream?: (msg: StreamMessage) => void
-  ): Promise<any> {
-    const id = args.id || crypto.randomUUID();
-    const request = { id, tool, args } as ToolRequest;
-    
-    return this.breaker.fire(request, onStream);
+  /**
+   * Validate and execute a tool call. `id` (optional) is echoed on every
+   * streamed frame so callers can correlate responses.
+   */
+  async execute(tool: ToolName, args: unknown, onStream?: OnStream, id?: string): Promise<unknown> {
+    const requestId = id ?? crypto.randomUUID();
+    const parsed = ToolRequestSchema.safeParse({ id: requestId, tool, args: args ?? {} });
+
+    if (!parsed.success) {
+      const error = new ToolValidationError(
+        `Invalid arguments for ${tool}: ${parsed.error.issues.map((i) => `${i.path.join('.')}: ${i.message}`).join('; ')}`,
+      );
+      onStream?.({ id: requestId, type: 'error', error: error.message, code: error.code });
+      throw error;
+    }
+
+    return this.executeRequest(parsed.data, onStream);
   }
 
-  private async executeInternal(request: ToolRequest, onStream?: (msg: StreamMessage) => void): Promise<any> {
-    const emit = (msg: Omit<StreamMessage, 'id'>) => {
-      if (onStream) onStream({ id: request.id, ...msg });
+  /** Execute an already-validated request (used by the CLI stream loop). */
+  async executeRequest(request: ToolRequest, onStream?: OnStream): Promise<unknown> {
+    try {
+      return await this.breaker.fire(request, onStream);
+    } catch (err) {
+      throw this.mapBreakerError(err, request, onStream);
+    }
+  }
+
+  private mapBreakerError(err: unknown, request: ToolRequest, onStream?: OnStream): Error {
+    const e = err as Error & { code?: string; status?: number };
+    // Octokit RequestErrors expose a deprecated `code` getter; only opossum's
+    // own errors (which have no `status`) carry the breaker codes.
+    if (typeof e.status === 'number') return e;
+    if (e.code === 'EOPENBREAKER') {
+      const mapped = new Error('GitHub API circuit breaker is open (too many recent failures); retry later');
+      onStream?.({ id: request.id, type: 'error', error: mapped.message, code: 'CIRCUIT_OPEN' });
+      return mapped;
+    }
+    if (e.code === 'ETIMEDOUT') {
+      const mapped = new Error(`Tool ${request.tool} timed out`);
+      onStream?.({ id: request.id, type: 'error', error: mapped.message, code: 'TIMEOUT' });
+      return mapped;
+    }
+    return e;
+  }
+
+  private async dispatch(request: ToolRequest, onStream?: OnStream): Promise<unknown> {
+    const emit: StreamEmitter = (msg) => {
+      onStream?.({ id: request.id, ...msg });
     };
 
     try {
       emit({ type: 'log', level: 'info', msg: `Executing tool: ${request.tool}` });
-      
-      let result: any;
+
+      let result: unknown;
       switch (request.tool) {
         case 'list_repos':
-          result = await this.listRepos(request.args);
+          result = await listRepos(this.octokit, request.args);
           break;
         case 'get_repo':
-          result = await this.getRepo(request.args);
+          result = await getRepo(this.octokit, request.args);
           break;
         case 'get_file_content':
-          result = await this.getFileContent(request.args, emit);
+          result = await getFileContent(this.octokit, request.args, emit);
           break;
         case 'get_diff':
-          result = await this.getDiff(request.args, emit);
+          result = await getDiff(this.octokit, request.args, emit);
           break;
         case 'create_branch':
-          result = await this.createBranch(request.args);
+          result = await createBranch(this.octokit, request.args);
           break;
         case 'commit_files':
-          result = await this.commitFiles(request.args);
+          result = await commitFiles(this.octokit, request.args);
           break;
         case 'create_pr':
-          result = await this.createPR(request.args);
+          result = await createPullRequest(this.octokit, request.args);
           break;
         case 'search_code':
-          result = await this.searchCode(request.args, emit);
+          result = await searchCode(this.octokit, request.args, emit);
           break;
         case 'list_issues':
-          result = await this.listIssues(request.args, emit);
+          result = await listIssues(this.octokit, request.args, emit);
           break;
-        default:
-          throw new Error(`Unknown tool: ${request.tool}`);
       }
 
       emit({ type: 'result', data: result });
       return result;
-    } catch (err: any) {
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
       logger.error({ err, tool: request.tool }, 'Tool execution failed');
-      emit({ type: 'error', error: err.message });
+      emit({ type: 'error', error: message });
       throw err;
     }
-  }
-
-  private async listRepos(args: any): Promise<any[]> {
-    const res = await this.octokit.repos.listForAuthenticatedUser({ 
-      visibility: args.visibility || 'all', 
-      per_page: 100 
-    });
-    return res.data.map(r => ({ full_name: r.full_name, private: r.private, default_branch: r.default_branch }));
-  }
-
-  private async getRepo(args: any): Promise<any> {
-    const res = await this.octokit.repos.get(args);
-    return { full_name: res.data.full_name, private: res.data.private, default_branch: res.data.default_branch };
-  }
-
-  private async getFileContent(args: any, emit: (msg: Omit<StreamMessage, 'id'>) => void): Promise<any> {
-    emit({ type: 'log', level: 'debug', msg: `Fetching ${args.path}@${args.ref}` });
-    const res = await this.octokit.repos.getContent(args);
-    const data = res.data as any;
-    
-    if (data.type !== 'file') throw new Error('Path is not a file');
-    
-    const content = Buffer.from(data.content, 'base64').toString('utf-8');
-    return { path: data.path, size: data.size, content, sha: data.sha };
-  }
-
-  private async getDiff(args: any, emit: (msg: Omit<StreamMessage, 'id'>) => void): Promise<any> {
-    emit({ type: 'log', level: 'debug', msg: `Generating diff ${args.base}...${args.head}` });
-    const res = await this.octokit.repos.compareCommitsWithBasehead({
-      ...args,
-      basehead: `${args.base}...${args.head}`,
-      mediaType: { format: 'diff' }
-    });
-    return { patch: res.data as unknown as string };
-  }
-
-  private async createBranch(args: any): Promise<any> {
-    const ref = await this.octokit.git.getRef({ ...args, ref: `heads/${args.source}` });
-    await this.octokit.git.createRef({ ...args, ref: `refs/heads/${args.branch}`, sha: ref.data.object.sha });
-    return { created: true, branch: args.branch, sha: ref.data.object.sha };
-  }
-
-  private async commitFiles(args: any): Promise<any> {
-    const { owner, repo, message, branch, files } = args;
-    const branchRes = await this.octokit.repos.getBranch({ owner, repo, branch });
-    const latestSha = branchRes.data.commit.sha;
-
-    const treeItems = files.map((f: any) => ({
-      path: f.path,
-      mode: '100644' as const,
-      type: 'blob' as const,
-      content: f.content,
-    }));
-
-    const treeRes = await this.octokit.git.createTree({ owner, repo, tree: treeItems, base_tree: latestSha });
-    const commitRes = await this.octokit.git.createCommit({ owner, repo, message, tree: treeRes.data.sha, parents: [latestSha] });
-    await this.octokit.git.updateRef({ owner, repo, ref: `heads/${branch}`, sha: commitRes.data.sha });
-
-    return { sha: commitRes.data.sha, files: files.length };
-  }
-
-  private async createPR(args: any): Promise<any> {
-    const res = await this.octokit.pulls.create(args);
-    return { url: res.data.html_url, number: res.data.number, state: res.data.state };
-  }
-
-  private async searchCode(args: any, emit: (msg: Omit<StreamMessage, 'id'>) => void): Promise<any[]> {
-    emit({ type: 'log', level: 'debug', msg: `Searching code: ${args.query}` });
-    const res = await this.octokit.search.code({ q: args.query, per_page: 50 });
-    return res.data.items.map(i => ({ repository: i.repository.full_name, path: i.path, url: i.html_url }));
-  }
-
-  private async listIssues(args: any, emit: (msg: Omit<StreamMessage, 'id'>) => void): Promise<any[]> {
-    emit({ type: 'log', level: 'debug', msg: `Listing issues (${args.state})` });
-    const res = await this.octokit.issues.listForRepo({ ...args, owner: args.owner, repo: args.repo });
-    return res.data.map(i => ({ number: i.number, title: i.title, state: i.state, url: i.html_url }));
   }
 }

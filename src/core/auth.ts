@@ -1,42 +1,90 @@
 import { Octokit } from '@octokit/rest';
 import { retry } from '@octokit/plugin-retry';
 import { throttling } from '@octokit/plugin-throttling';
-import { pRetry, AbortError } from 'p-retry';
+import { logger } from './logger.js';
 
-const RetryOctokit = Octokit.plugin(retry, throttling);
+export const RetryOctokit = Octokit.plugin(retry, throttling);
 
-export function createAuthenticatedClient(token: string): InstanceType<typeof RetryOctokit> {
+/** Concrete instance type of the plugin-enhanced Octokit client. */
+export type OctokitClient = InstanceType<typeof RetryOctokit>;
+
+export interface ClientOptions {
+  /** Disable the octokit-level retry plugin (retries are handled by withRetry). */
+  pluginRetries?: boolean;
+  /** Disable request throttling/pacing (useful in tests). Default: enabled. */
+  throttling?: boolean;
+}
+
+export function createAuthenticatedClient(token: string, opts: ClientOptions = {}): OctokitClient {
   if (!token) {
-    throw new Error('GITHUB_TOKEN environment variable is required');
+    throw new Error('A GitHub token is required (set GITHUB_TOKEN)');
   }
 
   return new RetryOctokit({
     auth: token,
-    retry: { enabled: true },
+    retry: { enabled: opts.pluginRetries ?? false },
     throttle: {
-      onRateLimit: (retryAfter, options) => {
-        console.warn(`Rate limit exceeded for ${options.method} ${options.url}. Retrying in ${retryAfter}s`);
-        return true;
+      enabled: opts.throttling ?? true,
+      onRateLimit: (retryAfter, options, _octokit, retryCount) => {
+        logger.warn({ retryAfter, url: options.url, retryCount }, 'Rate limit exceeded');
+        return retryCount < 2;
       },
-      onSecondaryRateLimit: (retryAfter, options) => {
-        console.warn(`Secondary rate limit for ${options.method} ${options.url}. Retrying in ${retryAfter}s`);
-        return true;
+      onSecondaryRateLimit: (retryAfter, options, _octokit, retryCount) => {
+        logger.warn({ retryAfter, url: options.url, retryCount }, 'Secondary rate limit hit');
+        return retryCount < 2;
       },
     },
   });
 }
 
-export async function executeWithRetry<T>(fn: () => Promise<T>): Promise<T> {
-  return pRetry(fn, {
-    retries: 3,
-    factor: 2,
-    minTimeout: 1000,
-    maxTimeout: 5000,
-    randomize: true,
-    onFailedAttempt: (error) => {
-      if (error.message.includes('Not Found') || error.message.includes('Bad credentials')) {
-        throw new AbortError(error);
+/** HTTP statuses where a retry cannot help. */
+const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 422]);
+
+/** Error class for application-level failures that must never be retried. */
+export class NonRetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'NonRetryableError';
+  }
+}
+
+export interface RetryOptions {
+  retries?: number;
+  minTimeoutMs?: number;
+  maxTimeoutMs?: number;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Execute `fn` with exponential backoff and full jitter. Errors carrying a
+ * non-retryable HTTP status (auth, not-found, validation) abort immediately.
+ */
+export async function withRetry<T>(fn: () => Promise<T>, opts: RetryOptions = {}): Promise<T> {
+  const retries = opts.retries ?? 3;
+  const minTimeout = opts.minTimeoutMs ?? 1000;
+  const maxTimeout = opts.maxTimeoutMs ?? 5000;
+
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (err instanceof NonRetryableError) {
+        throw err;
       }
-    },
-  });
+      const status = (err as { status?: number }).status;
+      if (status !== undefined && NON_RETRYABLE_STATUS.has(status)) {
+        throw err;
+      }
+      if (attempt < retries) {
+        const backoff = Math.min(minTimeout * 2 ** attempt, maxTimeout);
+        await delay(Math.random() * backoff);
+      }
+    }
+  }
+  throw lastError;
 }
